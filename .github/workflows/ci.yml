@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  prebuild-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    - name: Install just
+      uses: taiki-e/install-action@just
+
+    - name: Check Rust Version Increment
+      id: check_rust_version_increment
+      run: |
+        git describe --tags --abbrev=0
+        just check-version-bump
+
+  build-and-test-debug:
+    runs-on: ubuntu-latest
+    needs: prebuild-checks
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Cache Cargo
+      uses: Swatinem/rust-cache@v2
+      
+    - name: Install just
+      uses: taiki-e/install-action@just
+    
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@nextest
+    
+    - name: Run tests
+      run: just test
+
+  build-and-test-release:
+    runs-on: ubuntu-latest
+    needs: prebuild-checks
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache Cargo
+      uses: Swatinem/rust-cache@v2
+
+    - name: Install just
+      uses: taiki-e/install-action@just
+
+    - name: Install cargo-nextest
+      uses: taiki-e/install-action@nextest
+      
+    - name: Run tests
+      run: just test-release
+
+  build-and-push-docker-image:
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: write
+    needs: [build-and-test-debug, build-and-test-release]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0 # Fetch all history for git describe
+
+    - name: Check if version changed
+      id: check_version
+      run: |
+        CURRENT_VERSION=v$(cargo pkgid | cut -d "#" -f2) # Get current version from Cargo.toml
+        echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+        LATEST_TAG=$(git describe --tags --abbrev=0 main || echo "") # Get latest tag on main, handle no tags case
+        echo "Current version: $CURRENT_VERSION"
+        echo "Latest tag on main: $LATEST_TAG"
+        if [ "$CURRENT_VERSION" != "$LATEST_TAG" ]; then
+          echo "Version has changed. Proceeding with Docker build and push."
+          echo "version_changed=true" >> $GITHUB_OUTPUT
+        else
+          echo "Version has not changed. Skipping Docker build and push."
+          echo "version_changed=false" >> $GITHUB_OUTPUT
+        fi
+    
+    - name: Set up QEMU
+      if: steps.check_version.outputs.version_changed == 'true'
+      uses: docker/setup-qemu-action@v1
+
+    - name: Set up Docker Buildx
+      if: steps.check_version.outputs.version_changed == 'true'
+      uses: docker/setup-buildx-action@v1
+
+    - name: Log in to GitHub Container Registry
+      if: steps.check_version.outputs.version_changed == 'true'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      if: steps.check_version.outputs.version_changed == 'true'
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: ${{ steps.check_version.outputs.version_changed == 'true' }}
+        platforms: linux/aarch64
+        tags: ghcr.io/${{ github.repository }}/ecu_dashboard:${{ steps.check_version.outputs.current_version }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Create and push tag
+      if: steps.check_version.outputs.version_changed == 'true'
+      run: |
+        git config user.name github-actions
+        git config user.email github-actions@github.com
+        git tag ${{ steps.check_version.outputs.current_version }}
+        git push origin ${{ steps.check_version.outputs.current_version }}
