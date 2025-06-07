@@ -2,7 +2,7 @@
 default = "kellnr"
 
 [registries.kellnr]
-index = "sparse+http://localhost:8000/api/v1/crates/"
+index = "sparse+https://reimagined-winner-p94grq576jh67gr-8000.app.github.dev/api/v1/crates/"
 credential-provider = ["cargo:token"]
 token = "Zy9HhJ02RJmg0GCrgLfaCVfU6IwDfhXD"
 
